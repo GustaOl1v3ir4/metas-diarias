@@ -155,8 +155,10 @@ const SUGGESTIONS = [["Beber 2 L de água", 30], ["Ler 10 páginas", 30], ["Trei
 const RING = 2 * Math.PI * 34;
 
 let state = { goals: [], days: {} };
-let selected = keyOf(new Date());
+let today = keyOf(new Date());
+let selected = today;
 let store = null;
+let loaded = false;
 
 function keyOf(d) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -178,7 +180,6 @@ function goalsFor(key) { return state.goals.filter(g => g.createdAt <= key); }
 
 /* ---------- render ---------- */
 function render() {
-  const today = keyOf(new Date());
   const d = dateOf(selected);
   document.getElementById("dateLabel").textContent =
     `${WEEKDAYS[d.getDay()]}, ${d.getDate()} de ${MONTHS[d.getMonth()]}`;
@@ -250,7 +251,13 @@ function render() {
 }
 
 /* ---------- ações ---------- */
+// Antes de os dados salvos chegarem, qualquer mudança seria gravada por cima deles
+function ready() {
+  if (!loaded) statusEl.textContent = "Carregando seus dados… tente de novo em instantes.";
+  return loaded;
+}
 function toggle(goalId) {
+  if (!ready()) return;
   const ids = new Set(doneOn(selected));
   ids.has(goalId) ? ids.delete(goalId) : ids.add(goalId);
   if (ids.size) state.days[selected] = [...ids]; else delete state.days[selected];
@@ -258,12 +265,14 @@ function toggle(goalId) {
 }
 function addGoal(name, target) {
   name = name.trim();
-  if (!name) return;
-  const earliest = keyOf(new Date()) < selected ? keyOf(new Date()) : selected;
+  if (!name || !ready()) return false;
+  const earliest = today < selected ? today : selected;
   state.goals.push({ id: uid(), name, target: Math.max(1, Math.min(3650, target || 30)), createdAt: shift(earliest, -6) });
   changed();
+  return true;
 }
 function removeGoal(goalId) {
+  if (!ready()) return;
   state.goals = state.goals.filter(g => g.id !== goalId);
   for (const k of Object.keys(state.days)) {
     const ids = state.days[k].filter(id => id !== goalId);
@@ -275,8 +284,7 @@ function removeGoal(goalId) {
 document.getElementById("form").addEventListener("submit", e => {
   e.preventDefault();
   const name = document.getElementById("goalName"), target = document.getElementById("goalTarget");
-  addGoal(name.value, parseInt(target.value, 10));
-  name.value = "";
+  if (addGoal(name.value, parseInt(target.value, 10))) name.value = "";
   name.focus();
 });
 const chips = document.getElementById("chips");
@@ -286,6 +294,18 @@ for (const [name, target] of SUGGESTIONS) {
   b.onclick = () => addGoal(name, target);
   chips.append(b);
 }
+
+/* ---------- virada do dia ---------- */
+// Com a página aberta depois da meia-noite, "hoje" passa a ser o novo dia
+function checkDay() {
+  const now = keyOf(new Date());
+  if (now === today) return;
+  if (selected === today) selected = now;
+  today = now;
+  render();
+}
+setInterval(checkDay, 30000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) checkDay(); });
 
 /* ---------- salvamento ---------- */
 const statusEl = document.getElementById("status");
@@ -298,19 +318,25 @@ function changed() {
   timer = setTimeout(flush, 400);
 }
 async function flush() {
-  if (!store || saving || !dirty) return;
+  if (!store || !loaded || saving || !dirty) return;
   saving = true; dirty = false;
   try {
     await store.save(JSON.parse(JSON.stringify(state)));
     statusEl.textContent = store.note;
   } catch (err) {
-    statusEl.textContent = err?.code === "quota_exceeded"
+    statusEl.textContent = isQuotaError(err)
       ? "Espaço cheio: remova objetivos antigos para continuar salvando."
       : "Não foi possível salvar agora. Tente marcar de novo em instantes.";
   } finally {
     saving = false;
     if (dirty) flush();
   }
+}
+
+// localStorage lança DOMException "QuotaExceededError" (código 22; no Firefox antigo, "NS_ERROR_DOM_QUOTA_REACHED")
+function isQuotaError(err) {
+  return err?.code === "quota_exceeded" || err?.code === 22 || err?.code === 1014 ||
+    err?.name === "QuotaExceededError" || err?.name === "NS_ERROR_DOM_QUOTA_REACHED";
 }
 
 function localStore() {
@@ -349,14 +375,15 @@ async function start() {
     ref.onSnapshot(snap => {
       if (snap.metadata.hasPendingWrites) return;
       if (snap.exists) apply(snap.data());
+      if (!loaded) { loaded = true; flush(); }
       statusEl.textContent = store.note;
     }, () => { statusEl.textContent = "A sincronização parou. Recarregue a página."; });
   } else {
     store = localStore();
     apply(store.initial);
+    loaded = true;
     statusEl.textContent = store.note;
   }
-  if (dirty) flush();
 }
 start();
 </script>
