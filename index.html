@@ -32,6 +32,7 @@
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body {
   background: var(--bg); color: var(--fg); font: 400 16px/1.5 var(--body);
   padding-left: max(16px, env(safe-area-inset-left, 0px));
@@ -86,9 +87,16 @@ h1 { font-size: clamp(28px, 7vw, 38px); font-weight: 700; line-height: 1.05; }
 .progress { height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; }
 .progress i { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
 .badge { font-size: 12px; font-weight: 600; color: var(--on-accent); background: var(--accent); padding: 1px 8px; border-radius: 99px; }
-.remove { border: 0; background: none; color: var(--muted); font-size: 13px; padding: 6px; border-radius: 8px; }
+.actions { display: grid; justify-items: end; }
+.remove, .edit-btn, .ghost { border: 0; background: none; color: var(--muted); font-size: 13px; padding: 6px; border-radius: 8px; }
 .remove:hover { color: var(--danger); }
+.edit-btn:hover, .ghost:hover { color: var(--fg); }
 .remove.armed { color: var(--danger); font-weight: 600; }
+
+.goal.editing { grid-template-columns: 1fr; }
+.goal form.edit { background: none; border: 0; border-radius: 0; padding: 0; gap: 10px; }
+.edit-actions { display: flex; justify-content: flex-end; align-items: center; gap: 8px; }
+.edit-actions .primary { padding: 8px 14px; }
 
 .empty { border: 1.5px dashed var(--line); border-radius: 14px; padding: 22px; display: grid; gap: 12px; color: var(--muted); }
 .empty strong { color: var(--fg); font-family: var(--display); font-size: 19px; }
@@ -159,6 +167,7 @@ let today = keyOf(new Date());
 let selected = today;
 let store = null;
 let loaded = false;
+let editing = null; // { id, name, target } enquanto um objetivo está sendo editado
 
 function keyOf(d) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -212,6 +221,7 @@ function render() {
   list.replaceChildren();
   document.getElementById("empty").hidden = state.goals.length > 0;
   for (const g of goals) {
+    if (editing?.id === g.id) { list.append(editRow(g)); continue; }
     const total = totalDays(g.id), s = streak(g.id), checked = isDone(g.id, selected);
     const li = document.createElement("li");
     li.className = "goal" + (checked ? " done" : "");
@@ -226,11 +236,17 @@ function render() {
           ${total >= g.target ? `<span class="badge">Meta cumprida</span>` : ""}
         </div>
       </div>
-      <button class="remove" type="button">Remover</button>`;
+      <div class="actions">
+        <button class="edit-btn" type="button">Editar</button>
+        <button class="remove" type="button">Remover</button>
+      </div>`;
     li.querySelector(".name").textContent = g.name;
     const check = li.querySelector(".check");
     check.setAttribute("aria-label", `${checked ? "Desmarcar" : "Marcar"} ${g.name}`);
     check.onclick = () => toggle(g.id);
+    const ed = li.querySelector(".edit-btn");
+    ed.setAttribute("aria-label", `Editar ${g.name}`);
+    ed.onclick = () => { editing = { id: g.id, name: g.name, target: g.target }; render(); };
     const rm = li.querySelector(".remove");
     rm.onclick = () => {
       if (!rm.classList.contains("armed")) {
@@ -248,6 +264,47 @@ function render() {
     li.textContent = "Nenhum objetivo existia neste dia.";
     list.append(li);
   }
+}
+
+// Formulário no lugar do item; os valores digitados ficam em `editing` para sobreviver a um novo render
+function editRow(g) {
+  const li = document.createElement("li");
+  li.className = "goal editing";
+  li.innerHTML = `
+    <form class="edit" autocomplete="off">
+      <div class="row">
+        <label>Objetivo
+          <input name="name" required maxlength="80">
+        </label>
+        <label>Meta (dias)
+          <input name="target" type="number" min="1" max="3650" inputmode="numeric">
+        </label>
+      </div>
+      <div class="edit-actions">
+        <button class="ghost" type="button">Cancelar</button>
+        <button class="primary" type="submit">Salvar</button>
+      </div>
+    </form>`;
+  const form = li.querySelector("form"), name = form.elements.name, target = form.elements.target;
+  name.value = editing.name;
+  target.value = editing.target;
+  name.oninput = () => { editing.name = name.value; };
+  target.oninput = () => { editing.target = target.value; };
+  name.onfocus = () => { editing.field = "name"; };
+  target.onfocus = () => { editing.field = "target"; };
+  const cancel = () => { editing = null; render(); };
+  li.querySelector(".ghost").onclick = cancel;
+  form.addEventListener("keydown", e => { if (e.key === "Escape") cancel(); });
+  form.addEventListener("submit", e => {
+    e.preventDefault();
+    if (editGoal(g.id, name.value, parseInt(target.value, 10))) editing = null;
+    render();
+  });
+  // Um render (ex.: sincronização) recria o formulário; devolve o foco ao campo em uso
+  requestAnimationFrame(() => {
+    if (document.activeElement === document.body) (editing?.field === "target" ? target : name).focus();
+  });
+  return li;
 }
 
 /* ---------- ações ---------- */
@@ -271,8 +328,18 @@ function addGoal(name, target) {
   changed();
   return true;
 }
+function editGoal(goalId, name, target) {
+  name = name.trim();
+  const g = state.goals.find(g => g.id === goalId);
+  if (!g || !name || !ready()) return false;
+  g.name = name;
+  g.target = Math.max(1, Math.min(3650, target || g.target));
+  changed();
+  return true;
+}
 function removeGoal(goalId) {
   if (!ready()) return;
+  if (editing?.id === goalId) editing = null;
   state.goals = state.goals.filter(g => g.id !== goalId);
   for (const k of Object.keys(state.days)) {
     const ids = state.days[k].filter(id => id !== goalId);
